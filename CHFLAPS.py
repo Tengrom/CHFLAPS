@@ -17,6 +17,8 @@ import logging
 EPOCH_AS_FILETIME = 116444736000000000  # January 1, 1970 as MS file time
 HUNDREDS_OF_NANOSECONDS = 10000000
 period = datetime.utcnow() - timedelta(days=30)
+period2 = datetime.utcnow() - timedelta(days=7)
+
 #User , Password and domain  for LDAP query
 ADusers = ""
 ADpass = ""
@@ -120,7 +122,6 @@ def smb_info_parser(nmap_results,host_ip):
 
                 elif (Check_for_attributes[5] in parts):
                     output_str=str(output)
-                    
 
                     Dialects_part_fin=""
                     parts_split=output_str.split(":")
@@ -137,11 +138,10 @@ def smb_info_parser(nmap_results,host_ip):
                     Network_class.add_Dialects(Dialects_part_fin)
 
                 elif (Check_for_attributes[6] in parts):
-                    #print(parts)
                     Network_class.add_SMBv1("Enabled")
     return output_list
 #function to scan IP using Python nmap
-def nmap_scan(ip,name,domain,conn):
+def nmap_scan(ip,name,domain,conn,port_range):
     cur=conn.cursor()
     counter=1
     counter_test=1
@@ -152,14 +152,13 @@ def nmap_scan(ip,name,domain,conn):
     #print(ip)
     #print("=======================================")
 
-    # start scanning 
-    nm.scan(ip,'1-49151',"-sV --host-timeout 60m")
+    #Starting scan for 445 and 139 smb ports
+    nm.scan(ip,port_range,"-sV --host-timeout 60m")
     for host in nm.all_hosts():
         testhost=nm._scan_result['scan'][host]
         r2=nm._scan_result['scan'][host]['status']['state']
         r3=""
         r4=""
-    
         if r2=="up":	
             
             sites_results=sites_count(host)
@@ -185,11 +184,9 @@ def nmap_scan(ip,name,domain,conn):
                 # if host has been scanned update time_scan info in DB 
                 cur.execute("UPDATE Hosts SET time_scan = '{0}' ,IP='{1}' , Site = '{2}' , Continent = '{3}'  where name = '{4}' and domain= '{5}'".format(dt,host,sites_results,continent_results,name,domain))
                 conn.commit()
-            
             except:
-                #If no ports detected it could be network issue or firewall enabled 
                 postgres_ports(host,0,"filtered",name,domain,"firewall","all ports blocked by firewall",conn)
-        #Starting script smb-os-discovery if ports 445 and 139 are open               
+        
         if r2=="up" and (r3 == "open" or r4 == "open"):
             #print("---------------------start scan --------------------------------")
             if r3 == "open" :
@@ -202,7 +199,11 @@ def nmap_scan(ip,name,domain,conn):
             # Check if the host has not been  switched off in the middle of scan 
             if test_scan_finished_len==0:
                 #print(host+","+port_str+",Scan_error")
-                postgres_vuln(host,sites_results,"",name,"","","","Script_scan_error",continent_results,conn) 
+                postgres_vuln(host,sites_results,"",name,domain,"","","Script_scan_error",continent_results,conn)
+                lists_ip=host
+                lists_Computer_name=None
+                lists_Domain=domain
+                lists_OS=None
 
             else:
                 output_scan=nm._scan_result['scan'][host]
@@ -213,11 +214,41 @@ def nmap_scan(ip,name,domain,conn):
 
                     output=smb_info_parser(nm,host)
                     for lists in output:
-                        #writing info from netbios to DB
-                        postgres_vuln(lists.ip,sites_results,"SMB_INFO",name,lists.Computer_name,lists.Domain,lists.OS,"",continent_results,conn) 
+                         #writing info from netbios to DB
+                        postgres_vuln(lists.ip,sites_results,"SMB_INFO",name,lists.Computer_name,lists.Domain,lists.OS,"",continent_results,conn)
+                        lists_ip=lists.ip
+                        lists_Computer_name=lists.Computer_name
+                        lists_Domain=lists.Domain
+                        lists_OS=lists.OS
+
                 else:
-                    #print(host+",VULNERABLE,no_smb_info"+port_str)
-                    postgres_vuln(host,sites_results,"SMB_INFO",name,"no_smb_info","no_smb_info","no_smb_info","no_smb_info",continent_results,conn) 
+                    lists_ip=host
+                    lists_Computer_name=None
+                    lists_Domain=domain
+                    lists_OS=None
+
+                    postgres_vuln(host,sites_results,"SMB_INFO",name,domain,"no_smb_info","no_smb_info","no_smb_info",continent_results,conn) 
+            #scanning for additional vulns 
+            nm.scan(host,port_str,"--script smb-protocols.nse,smb-vuln-ms17-010.nse ")
+           
+
+            test_scan_finished=nm.all_hosts()
+            test_scan_finished_len=len(test_scan_finished)
+            # Check if the host has not been  switched off in the middle of scan 
+            if test_scan_finished_len!=0:
+                output_scan=nm._scan_result['scan'][host]
+                output_scan=str(output_scan)
+                #check if script script  list was able to got any info 
+                scan_results_test="SMBv1"
+                
+                if scan_results_test in output_scan:
+                    postgres_vulns(lists_ip,sites_results,"SMBv1",name,lists_Computer_name,lists_Domain,lists_OS,"",continent_results,conn)
+                    print("SMBv1")
+                scan_results_test="VULNERABLE"
+                
+                if scan_results_test in output_scan:
+                    postgres_vulns(lists_ip,sites_results,"MS17-010",name,lists_Computer_name,lists_Domain,lists_OS,"",continent_results,conn)
+                    print("VULNERABLE")
 
             #print("---------------------end scan --------------------------------")
 
@@ -237,8 +268,6 @@ def postgres_ports(ip_port,port,state,name,domain,service,details,conn):
     if not rows:
         
 
-        #print("==========================================")
-        #print("dodane port")
     
         cur.execute("INSERT INTO Hosts_tcp(ip,port,state,name,domain,service,details,time_scan) VALUES('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}')".format(ip_port,port,state,name,domain,service,details,dt))
         conn.commit()
@@ -246,18 +275,41 @@ def postgres_ports(ip_port,port,state,name,domain,service,details,conn):
         cur.execute("Update Hosts_tcp SET time_scan='{0}' where name = '{1}' AND domain ='{2}' AND port ='{3}' AND state = '{4}' ".format(dt,name,domain,port,state))
         conn.commit()
 
-
-#function to add info from smb-os-discovery script to DB
+# DB with information taken from smb discovery script
 def postgres_vuln(ip,site,vulnerable,name,netbios,domain,os,scan_error,continent,conn):
+    cur=conn.cursor() 
+    dt = datetime.now()
+    cur.execute("SELECT time_scan,name from Hosts_vuln where name = '{0}' AND domain = '{1}' AND VULNERABLE = '{2}'".format(name,domain,vulnerable))
+    rows=cur.fetchall()
+    Null=None
+    if not rows:
+        cur.execute("INSERT INTO Hosts_vuln (IP,site,continent,VULNERABLE,name,netbios,domain,os,time_scan,scan_error,remediated , incident ) VALUES('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}','{10}','{11}')".format(ip,site,continent,vulnerable,name,netbios,domain,os,dt,scan_error,None,None))
+        conn.commit()
+    else:
+        cur.execute('UPDATE Hosts_vuln SET IP = %s ,site = %s  , continent = %s ,time_scan =%s  where name = %s AND domain = %s',(ip,site,continent,dt,name,domain))
+
+
+#DB with information taken from other script like SMBv1 or MS17
+def postgres_vulns(ip,site,vulnerable,name,netbios,domain,os,scan_error,continent,conn):
     cur=conn.cursor() 
     dt = datetime.now()
     #print("==========================================")
     #print("dodane")
-    cur.execute("INSERT INTO Hosts_vuln (IP,site,continent,VULNERABLE,name,netbios,domain,os,time_scan,scan_error,remediated , incident ) VALUES('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}','{10}','{11}')".format(ip,site,continent,vulnerable,name,netbios,domain,os,dt,scan_error,None,None))
-    conn.commit()
+    cur.execute("SELECT time_scan,name from Hosts_vulns where name = '{0}' AND domain = '{1}' AND VULNERABLE = '{2}'".format(name,domain,vulnerable))
+    rows=cur.fetchall()
+    Null=None
+    if not rows:
+        cur.execute("INSERT INTO Hosts_vulns (IP,site,continent,VULNERABLE,details,name,netbios,domain,os,time_scan,scan_error,remediated , incident ) VALUES('{0}','{1}','{2}','{3}','{4}','{5}','{6}','{7}','{8}','{9}','{10}','{11}','{12}')".format(ip,site,continent,vulnerable,None,name,netbios,domain,os,dt,scan_error,None,None))
+        conn.commit()
+    else:
+        cur.execute('UPDATE Hosts_vulns SET IP = %s ,site = %s  , continent = %s ,time_scan =%s  where name = %s AND domain = %s',(ip,site,continent,dt,name,domain))
+
+
+
 #function to checking if host has been scanned or scanns are old and need to be rescanned
 def postgress(process_name,tasks,result_multi):
-    #adding task to process   
+    results_ports="start"
+ #adding task to process 
     print('[%s] evaluation routine starts' % process_name)
     while True:
         new_value = tasks.get()
@@ -265,13 +317,13 @@ def postgress(process_name,tasks,result_multi):
         if type(new_value) == int:
             print('[%s] evaluation routine quits' % process_name)
             result_multi.put(-1)
+            logging.debug('[%s] evaluation routine quits' % process_name)
+
             break
         else:
-            
             conn=psycopg2.connect(dbname='ldap', user='', password='' ,host = "127.0.0.1", port = "5432")
 
             cur = conn.cursor()
-        
             lastlogontime=new_value[0]
             name=new_value[1]
             dnshostname=new_value[2]
@@ -280,29 +332,55 @@ def postgress(process_name,tasks,result_multi):
             rows=cur.fetchall()
             dt = datetime.now()
             Null=None
+            port_range='1-49151' 
+
             if not rows:
                 cur.execute('INSERT INTO Hosts (lastLogonTimestamp,ip,site,continent,name,DNS,domain,time_scan)    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',(lastlogontime,None,None,None,name,dnshostname,domain,None)) 
                 conn.commit()
-                nmap_scan(dnshostname,name,domain,conn) 
                 results_ports="new"
+                
+                try:
+                    nmap_scan(dnshostname,name,domain,conn,port_range) 
+                except Exception as n:
+                    logging.warning("nmap_scan error "+results_ports+" error: "+str(n)) 
+               
+
             elif rows[0][0] is None:
                 cur.execute('UPDATE Hosts SET lastLogonTimestamp = %s where name = %s AND domain = %s',(lastlogontime,name,domain))
                 conn.commit()
-                nmap_scan(dnshostname,name,domain,conn) 
                 results_ports="scanned"
-            else(rows[0][0]):
-                if (rows[0][0] > period):
-#                        results_ports="rescaned"
+
+                try:
+                    nmap_scan(dnshostname,name,domain,conn,port_range) 
+                except Exception as n:
+                    logging.warning("nmap_scan error "+results_ports+" error: "+str(n)) 
+               
+            else:
+                print(rows[0][0])
+                print(period)
+                if (rows[0][0] < period2):
+                        print("rescanned")
+                        results_ports="rescaned"
                         cur.execute('UPDATE Hosts SET lastLogonTimestamp = %s where name = %s AND domain = %s',(lastlogontime,name,domain))
                         conn.commit()
-                        nmap_scan(dnshostname,name,domain,conn) 
+                        port_range='139,445'
+                        try:
+                            nmap_scan(dnshostname,name,domain,conn,port_range) 
+                        except Exception as n:
+                            logging.warning("nmap_scan error "+results_ports+" error: "+str(n)) 
+
+                       
+                else:
+                        cur.execute('UPDATE Hosts SET lastLogonTimestamp = %s where name = %s AND domain = %s',(lastlogontime,name,domain))
+                        conn.commit()
+                        results_ports="ignored"
     cur.close()
     conn.close()
     result_multi.put(results_ports)
     return
-#function to query LDAP    
+  #function to query LDAP   
 def queryLDAP(user,passwd,domain):
-        l = ldap.initialize("ldap://"+ADdomains)
+        l = ldap.initialize("ldap://"+domain)
         l.protocol_version = ldap.VERSION3
         l.set_option(ldap.OPT_REFERRALS, 0)
         bind = l.simple_bind_s(user + "@" + domain, passwd)
@@ -328,7 +406,7 @@ for pid in psutil.pids():
         flag=1
 count_sum=0
 if (flag ==  0):
-    
+    #else:
     logging.debug("Script started") 
 
     try:
@@ -348,10 +426,10 @@ if (flag ==  0):
             results2=queryLDAP(ADusers, ADpass, ADdomains)
             logging.debug("ldap import finished")
            
-        except:
+        except Exception as l:
             dt = datetime.now()
             dt_str=str(dt)
-            logging.warning("ldap import failed")
+            logging.warning("ldap import failed: "+str(l))
         # Define IPC manager
         manager = multiprocessing.Manager()
         # Define a list (queue) for tasks and computation results
@@ -374,8 +452,8 @@ if (flag ==  0):
 
         
 
-# listing hosts exported from ldap 
 
+# listing hosts exported from ldap 
         for r in results2:
                
             try:
@@ -396,22 +474,25 @@ if (flag ==  0):
                     dns=ldap_name_decoded+ADdomains
                 try:
                     line=[ptime,ldap_name_decoded,dns,ADdomains]
-                    #That function is starting process and function postgress ( with is checking if host need to be scanned )
+                    #logging.debug("start task "+dns+" "+str(count_sum)+" from "+str(len(results2)))
+#That function put hosts to waiting  postgress function in previusly opened process   ( with is checking if host need to be scanned )
                     tasks.put(line)
                     sleep(1)
-                except:
-                    logging.warning("nmap scan failed "+dns)
+                except Exception as e:
+                    logging.warning("nmap scan failed "+dns+" error: "+str(e))    
+                #logging.debug("end task "+dns+" "+str(count_sum)+" from+ "+str(len(results2)))
+
                 
-                
-                
-                count_sum += 1
-        #Closing all opened rocesses
+      #Closing all opened processes if array with hosts from LDAP ends
+            count_sum += 1
+        logging.debug("ldap list  finished,"+str(count_sum)) 
+
         for i in range(num_processes):
             tasks.put(-1)						
-       
+            # Read calculation results
         num_finished_processes = 0
-        
         while True:
+            sleep(1)
             new_result = result_multi.get()
             if new_result == -1:
                 num_finished_processes += 1

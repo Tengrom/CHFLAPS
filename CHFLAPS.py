@@ -14,15 +14,30 @@ import csv
 import psutil
 import os
 import logging
+import configparser
 EPOCH_AS_FILETIME = 116444736000000000  # January 1, 1970 as MS file time
 HUNDREDS_OF_NANOSECONDS = 10000000
 period = datetime.utcnow() - timedelta(days=30)
 period2 = datetime.utcnow() - timedelta(days=7)
-
+#initial config 
+config = configparser.ConfigParser()
+#path to  config
+try:
+    config.read('<type>')
+except Exception as conf:
+    print("error loading config : "+conf)
 #User , Password and domain  for LDAP query
-ADusers = ""
-ADpass = ""
-ADdomains = ""
+ADusers = config['DEFAULT']['ADusers']
+ADpass = config['DEFAULT']['ADpass']
+ADdomains = config['DEFAULT']['ADdomains']
+Subnet= config['DEFAULT']['Subnet']
+Sites = config['DEFAULT']['Sites']
+
+site_res=config['DEFAULT']['site_res']
+postgress_user=config['DEFAULT']['postgress_user']
+postgress_pass=config['DEFAULT']['postgress_pass']
+postgress_ip=config['DEFAULT']['postgress_ip']
+
 #Initialize Port Scanner
 nm=nmap.PortScanner()
 #Class for information from smb-os-discovery nmap script
@@ -58,21 +73,21 @@ class SMB_host:
         self.SMBv1=SMBv1
 #function to checking from with subnets is scanned IP( need to be moved from file to DB)
 def sites_continent(ip):
-    site_res=""
-    with open('/root/script/Subnets_NA.csv' ) as csvfile:
+    site_res_out=""
+    with open(Subnet) as csvfile:
         spamreader = csv.reader(csvfile, delimiter=',', quotechar='|')
         for row in spamreader:
             value=row[0]
             value2=value
 
             if(ipaddress.ip_address(ip) in ipaddress.ip_network(value2, False)):
-                site_res="NA"
+                site_res_out=site_res
     return site_res
 
 #function to checking from with subnets is scanned IP( need to be moved from file to DB)
 def sites_count(ip):
-    site_res=""
-    with open('/root/script/sites_list.csv' ) as csvfile:
+    site_res_out=""
+    with open(Sites) as csvfile:
         spamreader = csv.reader(csvfile, delimiter=',', quotechar='|')
         for row in spamreader:
             value=row[3]+'/'+row[4]
@@ -81,8 +96,8 @@ def sites_count(ip):
             
             if (row[3]!="Network"):
                 if(ipaddress.ip_address(ip) in ipaddress.ip_network(value2, False)):
-                    site_res=row[5]
-    return site_res
+                    site_res_out=row[5]
+    return site_res_out
 #function to parse info from smb-os-discovery
 def smb_info_parser(nmap_results,host_ip):
     output_list=[]
@@ -215,7 +230,7 @@ def nmap_scan(ip,name,domain,conn,port_range):
                     output=smb_info_parser(nm,host)
                     for lists in output:
                          #writing info from netbios to DB
-                        postgres_vuln(lists.ip,sites_results,"SMB_INFO",name,lists.Computer_name,lists.Domain,lists.OS,"",continent_results,conn)
+                        postgres_vuln(lists.ip,sites_results,"SMB_INFO",name,lists.Domain,lists.Computer_name,lists.OS,"",continent_results,conn)
                         lists_ip=lists.ip
                         lists_Computer_name=lists.Computer_name
                         lists_Domain=lists.Domain
@@ -242,12 +257,12 @@ def nmap_scan(ip,name,domain,conn,port_range):
                 scan_results_test="SMBv1"
                 
                 if scan_results_test in output_scan:
-                    postgres_vulns(lists_ip,sites_results,"SMBv1",name,lists_Computer_name,lists_Domain,lists_OS,"",continent_results,conn)
+                    postgres_vulns(lists_ip,sites_results,"SMBv1",name,lists_Domain,lists_Computer_name,lists_OS,"",continent_results,conn)
                     print("SMBv1")
                 scan_results_test="VULNERABLE"
                 
                 if scan_results_test in output_scan:
-                    postgres_vulns(lists_ip,sites_results,"MS17-010",name,lists_Computer_name,lists_Domain,lists_OS,"",continent_results,conn)
+                    postgres_vulns(lists_ip,sites_results,"MS17-010",name,lists_Domain,lists_Computer_name,lists_OS,"",continent_results,conn)
                     print("VULNERABLE")
 
             #print("---------------------end scan --------------------------------")
@@ -276,7 +291,7 @@ def postgres_ports(ip_port,port,state,name,domain,service,details,conn):
         conn.commit()
 
 # DB with information taken from smb discovery script
-def postgres_vuln(ip,site,vulnerable,name,netbios,domain,os,scan_error,continent,conn):
+def postgres_vuln(ip,site,vulnerable,name,domain,netbios,os,scan_error,continent,conn):
     cur=conn.cursor() 
     dt = datetime.now()
     cur.execute("SELECT time_scan,name from Hosts_vuln where name = '{0}' AND domain = '{1}' AND VULNERABLE = '{2}'".format(name,domain,vulnerable))
@@ -290,7 +305,7 @@ def postgres_vuln(ip,site,vulnerable,name,netbios,domain,os,scan_error,continent
 
 
 #DB with information taken from other script like SMBv1 or MS17
-def postgres_vulns(ip,site,vulnerable,name,netbios,domain,os,scan_error,continent,conn):
+def postgres_vulns(ip,site,vulnerable,name,domain,netbios,os,scan_error,continent,conn):
     cur=conn.cursor() 
     dt = datetime.now()
     #print("==========================================")
@@ -321,7 +336,7 @@ def postgress(process_name,tasks,result_multi):
 
             break
         else:
-            conn=psycopg2.connect(dbname='ldap', user='', password='' ,host = "127.0.0.1", port = "5432")
+            conn=psycopg2.connect(dbname='ldap', user=postgress_user, password=postgress_pass ,host = postgress_ip, port = "5432")
 
             cur = conn.cursor()
             lastlogontime=new_value[0]
@@ -380,7 +395,11 @@ def postgress(process_name,tasks,result_multi):
     return
   #function to query LDAP   
 def queryLDAP(user,passwd,domain):
-        l = ldap.initialize("ldap://"+domain)
+        if 'Domain' in config:
+            ldap_out=config['Domain']['ldap']
+        else:
+            ldap_out=ADdomains
+        l = ldap.initialize("ldap://"+ldap_out)
         l.protocol_version = ldap.VERSION3
         l.set_option(ldap.OPT_REFERRALS, 0)
         bind = l.simple_bind_s(user + "@" + domain, passwd)
@@ -411,7 +430,7 @@ if (flag ==  0):
 
     try:
 
-        conn=psycopg2.connect(dbname='ldap', user='', password='' ,host = "127.0.0.1", port = "5432")
+        conn=psycopg2.connect(dbname='ldap', user=postgress_user, password=postgress_pass ,host = postgress_ip, port = "5432")
         logging.debug("Postgresql connected") 
  
         
